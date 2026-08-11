@@ -3184,6 +3184,39 @@
       return cfg;
     }
 
+    /**
+     * Open a HID device handle with retry on transient failures.
+     * Retries up to 8 times with increasing delays to handle:
+     * - OS-level handle not yet released after tab close (mouhid race)
+     * - Device busy during re-enumeration
+     * @param {HIDDevice} device - The device handle to open.
+     * @param {string} label - Log label for the device.
+     * @returns {Promise<void>}
+     */
+    async _openHandleWithRetry(device, label) {
+      if (!device || device.opened) return;
+      const maxRetries = 8;
+      const baseDelay = 200;
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+          await device.open();
+          return;
+        } catch (err) {
+          if (attempt < maxRetries - 1) {
+            const delay = baseDelay * (attempt + 1);
+            console.warn(
+              "[Razer] " + (label || "device") + " open failed (attempt " +
+              (attempt + 1) + "/" + maxRetries + "), retry in " + delay + "ms: " +
+              (err.message || err)
+            );
+            await sleep(delay);
+          } else {
+            throw err;
+          }
+        }
+      }
+    }
+
     async open(opts = {}) {
       const options = isObject(opts) ? opts : {};
       const {
@@ -3199,12 +3232,12 @@
       let openedEvent = false;
       try {
         if (!controlDevice.opened) {
-          await controlDevice.open();
+          await this._openHandleWithRetry(controlDevice, "control");
           openedControl = true;
         }
 
         if (eventDevice && !eventDevice.opened) {
-          await eventDevice.open();
+          await this._openHandleWithRetry(eventDevice, "event");
           openedEvent = true;
         }
 
@@ -3216,7 +3249,7 @@
 
         if (openEventDevice && eventDevice && !eventDevice.opened) {
           try {
-            await eventDevice.open();
+            await this._openHandleWithRetry(eventDevice, "event-bootstrap");
             openedEvent = true;
           } catch (err) {
             if (!tolerateEventDeviceOpenFailure) throw err;
@@ -4232,6 +4265,7 @@
     defaultFilters: SUPPORTED_PIDS.map((productId) => ({
       vendorId: RAZER_VENDOR_ID,
       productId,
+      usagePage: RAZER_WEBHID_CONTROL_USAGE_PAGE,
     })),
     isSupportedPid(productId) {
       return SUPPORTED_PID_SET.has(Number(productId));

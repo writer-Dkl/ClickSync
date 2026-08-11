@@ -290,6 +290,7 @@
     const firstCollection = collections[0] || null;
     const featureReportCount = _countHidReports(d, "featureReports");
     const inputReportCount = _countHidReports(d, "inputReports");
+    const outputReportCount = _countHidReports(d, "outputReports");
     const transportMeta = _getRazerTransportMeta(d?.productId);
     const firstCollectionFeatureReportCount = Array.isArray(firstCollection?.featureReports)
       ? firstCollection.featureReports.length
@@ -328,6 +329,7 @@
       firstCollectionInputReportCount,
       featureReportCount,
       inputReportCount,
+      outputReportCount,
       hasFeatureReports: featureReportCount > 0,
       hasInputReports: inputReportCount > 0,
       controlUsagePage,
@@ -836,6 +838,7 @@
         " legacyCtrl=" + s.legacyControlCandidate +
         " featRpts=" + s.featureReportCount +
         " inputRpts=" + s.inputReportCount +
+        " outRpts=" + s.outputReportCount +
         " name=" + String(s.productName || "").substring(0, 40));
     });
 

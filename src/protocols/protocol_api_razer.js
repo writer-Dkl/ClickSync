@@ -576,6 +576,7 @@
       this._inputListenerBound = false;
       this._lastInputBytes = null;
       this._lastInputTs = 0;
+      this._reopenedOnce = false;
     }
 
     setDevice(device, productId = 0, opts = {}) {
@@ -589,6 +590,7 @@
       this._channelDegraded = null;
       this._lastInputBytes = null;
       this._lastInputTs = 0;
+      this._reopenedOnce = false;
     }
 
     setTransportMode(mode) {
@@ -598,6 +600,7 @@
       this._channelDegraded = null;
       this._lastInputBytes = null;
       this._lastInputTs = 0;
+      this._reopenedOnce = false;
     }
 
     _usesLegacyV3Transport() {
@@ -678,7 +681,9 @@
           console.warn("[Razer] Feature channel unavailable, degraded to output report " + rid);
           return true;
         } catch (e) {
-          // try next candidate
+          const eMsg = String(e?.message || e || "");
+          const eCode = String(e?.code || e?.name || "");
+          console.warn("[Razer] sendReport(" + rid + ") fallback failed | code=" + eCode + " | msg=" + eMsg);
         }
       }
       return false;
@@ -706,6 +711,23 @@
       throw new ProtocolError(`input report timeout (${this.readTimeoutMs}ms)`, "IO_READ_TIMEOUT", {
         timeoutMs: this.readTimeoutMs,
       });
+    }
+
+    async _reopenControlDevice() {
+      const dev = this.device;
+      if (!dev) return;
+      if (dev.opened) {
+        try {
+          await dev.close();
+        } catch (e) {
+          // ignore close errors
+        }
+      }
+      await sleep(150);
+      await dev.open();
+      this._channelDegraded = null;
+      this._lastInputBytes = null;
+      this._lastInputTs = 0;
     }
 
     async _recvFeature(reportId) {
@@ -846,6 +868,17 @@
                 : RAZER_NOT_ALLOWED_SAME_ID_RETRY;
               const permissionRetryBudget = Math.min(retryBudget, sameIdRetry);
               if (attempt >= permissionRetryBudget) throw err;
+              // The kernel driver (mouhid) may have seized the interface; try to
+              // regain I/O by closing and reopening the control device once.
+              if (usesLegacyV3 && !this._reopenedOnce) {
+                this._reopenedOnce = true;
+                try {
+                  console.warn("[Razer] Feature write blocked, reopening control device to regain I/O...");
+                  await this._reopenControlDevice();
+                } catch (reopenErr) {
+                  console.warn("[Razer] Reopen attempt failed: " + String(reopenErr?.message || reopenErr));
+                }
+              }
             }
 
             if (

@@ -230,27 +230,16 @@
   function _pickRazerViperNonMouseControlHandle(handles, mouseHandle) {
     if (!mouseHandle) return null;
     var mouseSummary = mouseHandle.summary;
-    var matchesPid = function (item) {
-      return (
-        item.device !== mouseHandle.device
-        && _isRazerViperV3Pid(item.summary && item.summary.productId)
-        && item.summary.vendorId === mouseSummary.vendorId
-        && item.summary.productId === mouseSummary.productId
-      );
-    };
-    // Preferred: multi-collection interface (MI_02 Razer control interface).
-    // It often ALSO contains a mouse collection, so it cannot be excluded by
-    // legacyPrimaryMouseCollection; distinguish by collectionCount instead.
-    var multiCollection = handles.find(function (item) {
-      return matchesPid(item)
-        && item.summary.collectionCount > 1
-        && item.summary.inputReportCount > 0;
-    });
-    if (multiCollection) return multiCollection;
-    // Fallback: single-collection non-mouse interface (e.g. keyboard MI_01).
     return (
       handles.find(function (item) {
-        return matchesPid(item) && !item.summary.legacyPrimaryMouseCollection;
+        return (
+          item.device !== mouseHandle.device
+          && _isRazerViperV3Pid(item.summary && item.summary.productId)
+          && item.summary.vendorId === mouseSummary.vendorId
+          && item.summary.productId === mouseSummary.productId
+          && !item.summary.legacyPrimaryMouseCollection
+          && item.summary.featureReportCount > 0
+        );
       })
       || null
     );
@@ -290,7 +279,6 @@
     const firstCollection = collections[0] || null;
     const featureReportCount = _countHidReports(d, "featureReports");
     const inputReportCount = _countHidReports(d, "inputReports");
-    const outputReportCount = _countHidReports(d, "outputReports");
     const transportMeta = _getRazerTransportMeta(d?.productId);
     const firstCollectionFeatureReportCount = Array.isArray(firstCollection?.featureReports)
       ? firstCollection.featureReports.length
@@ -329,7 +317,6 @@
       firstCollectionInputReportCount,
       featureReportCount,
       inputReportCount,
-      outputReportCount,
       hasFeatureReports: featureReportCount > 0,
       hasInputReports: inputReportCount > 0,
       controlUsagePage,
@@ -838,7 +825,6 @@
         " legacyCtrl=" + s.legacyControlCandidate +
         " featRpts=" + s.featureReportCount +
         " inputRpts=" + s.inputReportCount +
-        " outRpts=" + s.outputReportCount +
         " name=" + String(s.productName || "").substring(0, 40));
     });
 

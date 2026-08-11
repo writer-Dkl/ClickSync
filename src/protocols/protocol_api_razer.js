@@ -4019,14 +4019,22 @@
             }
           }
         }
-        console.warn("[Razer] Legacy V3 battery read failed", {
-          field: String(label || ""),
-          pid,
-          transportMode: this._transportMode,
-          code: String(lastErr?.code || ""),
-          message: String(lastErr?.message || lastErr || ""),
-          err: lastErr,
-        });
+        const errCode = String(lastErr?.code || "?");
+        const errMsg = String(lastErr?.message || lastErr || "");
+        const devInfo = this.device || {};
+        const colInfo = (devInfo.collections && devInfo.collections[0]) || {};
+        console.warn(
+          "[Razer] Legacy V3 battery read FAILED | field=" + String(label || "") +
+          " | code=" + errCode +
+          " | msg=" + errMsg.substring(0, 150) +
+          " | transportMode=" + this._transportMode +
+          " | device.opened=" + (!!(this.device && this.device.opened)) +
+          " | featureReports=" + (colInfo.featureReports ? colInfo.featureReports.length : 0) +
+          " | inputReports=" + (colInfo.inputReports ? colInfo.inputReports.length : 0) +
+          " | reportId=" + (this._driver?._reportId ?? "?") +
+          " | pid=" + pid,
+          { field: String(label || ""), pid, transportMode: this._transportMode, code: errCode, message: errMsg, err: lastErr }
+        );
         return null;
       };
 

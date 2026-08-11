@@ -93,10 +93,10 @@
   // When only one report-id is available, allow short retry for transient NotAllowedError.
   const RAZER_NOT_ALLOWED_SAME_ID_RETRY = 0;
   const RAZER_LEGACY_NOT_ALLOWED_SAME_ID_RETRY = 2;
-  const RAZER_LEGACY_COMMAND_WAIT_MS = 60;
+  const RAZER_LEGACY_COMMAND_WAIT_MS = 120;
   const RAZER_WEBHID_REPORT_ID = 0x00;
   // Some wireless paths need a short settle window right after open().
-  const RAZER_POST_OPEN_SETTLE_MS = 60;
+  const RAZER_POST_OPEN_SETTLE_MS = 150;
   // dpiStages can be temporarily unavailable right after first open(), so add
   // a small targeted retry before falling back to existing snapshot behavior.
   const RAZER_DPI_STAGES_READ_ATTEMPTS = 3;
@@ -3289,7 +3289,7 @@
         readRetry = 2,
         openRetryDelayMs = 120,
         readRetryDelayMs = (normalizedReason === "connect" ? 40 : 120),
-        readTimeoutMs = 2000,
+        readTimeoutMs = 4000,
         sendTimeoutMs = null,
         useCacheFallback = true,
         initialReadMode = "full",
@@ -3996,26 +3996,38 @@
       };
       const isLegacyV3 = this._usesLegacyV3Transport();
       const queryBatteryField = async (label, packet) => {
-        try {
-          return await this._safeQuery(
-            packet,
-            null,
-            isLegacyV3
-              ? { swallowPermissionPathError: false, swallowCodes: [] }
-              : {}
-          );
-        } catch (err) {
-          if (!isLegacyV3) throw err;
-          console.warn("[Razer] Legacy V3 battery read failed", {
-            field: String(label || ""),
-            pid,
-            transportMode: this._transportMode,
-            code: String(err?.code || ""),
-            message: String(err?.message || err || ""),
-            err,
-          });
-          return null;
+        // Legacy V3 wireless paths can have high-latency roundtrips;
+        // retry each field once with a generous wait to handle transient
+        // dongle wake / RF retransmission delays.
+        const maxAttempts = isLegacyV3 ? 2 : 1;
+        const retryWaitMs = 300;
+        let lastErr = null;
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          try {
+            return await this._safeQuery(
+              packet,
+              null,
+              isLegacyV3
+                ? { swallowPermissionPathError: false, swallowCodes: [] }
+                : {}
+            );
+          } catch (err) {
+            lastErr = err;
+            if (!isLegacyV3) throw err;
+            if (attempt < maxAttempts - 1) {
+              await sleep(retryWaitMs);
+            }
+          }
         }
+        console.warn("[Razer] Legacy V3 battery read failed", {
+          field: String(label || ""),
+          pid,
+          transportMode: this._transportMode,
+          code: String(lastErr?.code || ""),
+          message: String(lastErr?.message || lastErr || ""),
+          err: lastErr,
+        });
+        return null;
       };
 
       const batteryRes = await queryBatteryField("battery", ProtocolCodec.commands.getBattery(tx));

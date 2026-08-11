@@ -230,16 +230,27 @@
   function _pickRazerViperNonMouseControlHandle(handles, mouseHandle) {
     if (!mouseHandle) return null;
     var mouseSummary = mouseHandle.summary;
+    var matchesPid = function (item) {
+      return (
+        item.device !== mouseHandle.device
+        && _isRazerViperV3Pid(item.summary && item.summary.productId)
+        && item.summary.vendorId === mouseSummary.vendorId
+        && item.summary.productId === mouseSummary.productId
+      );
+    };
+    // Preferred: multi-collection interface (MI_02 Razer control interface).
+    // It often ALSO contains a mouse collection, so it cannot be excluded by
+    // legacyPrimaryMouseCollection; distinguish by collectionCount instead.
+    var multiCollection = handles.find(function (item) {
+      return matchesPid(item)
+        && item.summary.collectionCount > 1
+        && item.summary.inputReportCount > 0;
+    });
+    if (multiCollection) return multiCollection;
+    // Fallback: single-collection non-mouse interface (e.g. keyboard MI_01).
     return (
       handles.find(function (item) {
-        return (
-          item.device !== mouseHandle.device
-          && _isRazerViperV3Pid(item.summary && item.summary.productId)
-          && item.summary.vendorId === mouseSummary.vendorId
-          && item.summary.productId === mouseSummary.productId
-          && !item.summary.legacyPrimaryMouseCollection
-          && item.summary.featureReportCount > 0
-        );
+        return matchesPid(item) && !item.summary.legacyPrimaryMouseCollection;
       })
       || null
     );

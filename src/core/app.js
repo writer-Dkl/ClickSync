@@ -181,9 +181,6 @@
     let rafId = 0;
     let lastFrameTime = performance.now();
     let reduceMotion = false;
-    let hostRectCache = null;
-    let lettersMatrixInverseCache = null;
-    let pointerInfluencing = false;
 
     try {
       reduceMotion = !!window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
@@ -211,79 +208,27 @@
       return key;
     }
 
-    function clampNumber(value, min, max) {
-      return Math.max(min, Math.min(value, max));
-    }
-
-    function refreshWordGeometryCache() {
-      try {
-        hostRectCache = host.getBoundingClientRect();
-        const matrix = letters.getScreenCTM();
-        lettersMatrixInverseCache = matrix ? matrix.inverse() : null;
-      } catch (_) {
-        hostRectCache = null;
-        lettersMatrixInverseCache = null;
-      }
-    }
-
-    function clearWordGeometryCache() {
-      hostRectCache = null;
-      lettersMatrixInverseCache = null;
-      pointerInfluencing = false;
-    }
-
-    function isPointerInInfluenceBand() {
-      const hostRect = hostRectCache;
-      if (!hostRect) return false;
-      return (
-        pointer.x >= hostRect.left - 80 &&
-        pointer.x <= hostRect.right + 80 &&
-        pointer.y >= hostRect.top - 40 &&
-        pointer.y <= hostRect.bottom + 40
-      );
-    }
-
-    function hasActiveGlyphMotion() {
-      return glyphs.some((glyph) => (
-        Math.abs(glyph.x) > 0.02 ||
-        Math.abs(glyph.y) > 0.02 ||
-        Math.abs(glyph.vx) > 0.02 ||
-        Math.abs(glyph.vy) > 0.02
-      ));
-    }
-
     function placeHost(pageKey) {
       const anchor = getPlacementAnchor(pageKey);
       const grid = currentMount || host.parentElement || document.querySelector(".grid-bg");
-      if (!grid || (pageKey !== "keys" && !anchor)) return;
+      if (!anchor || !grid) return;
 
+      const anchorRect = anchor.getBoundingClientRect();
       const gridRect = grid.getBoundingClientRect();
+      const gap = -85;
+      const topOffset = -10;
+      const left = anchorRect.right - gridRect.left + gap;
       const hostWidth = Math.max(1, host.getBoundingClientRect().width || 186);
       const ratio = Number.isFinite(wordViewRatio) && wordViewRatio > 0 ? wordViewRatio : (720 / wordViewW);
       const naturalHeight = hostWidth * ratio;
       const height = naturalHeight + 6;
-
-      let left = 0;
-      let rawTop = 0;
-      if (pageKey === "keys") {
-        const viewportRight = clampNumber(window.innerWidth * 0.014, 18, 34);
-        left = window.innerWidth - gridRect.left - viewportRight - hostWidth;
-        rawTop = 44 - gridRect.top;
-      } else {
-        const anchorRect = anchor.getBoundingClientRect();
-        const gap = -85;
-        const topOffset = -10;
-        left = anchorRect.right - gridRect.left + gap;
-        rawTop = anchorRect.top - gridRect.top + topOffset;
-      }
-
+      const rawTop = anchorRect.top - gridRect.top + topOffset;
       const top = Math.max(24, Math.min(rawTop, window.innerHeight - height - 24));
 
       host.style.left = `${left}px`;
       host.style.right = "auto";
       host.style.top = `${top}px`;
       host.style.height = `${height}px`;
-      refreshWordGeometryCache();
     }
 
     function renderWord(word) {
@@ -385,7 +330,6 @@
       pointer.active = false;
       pointer.x = -9999;
       pointer.y = -9999;
-      pointerInfluencing = false;
       if (schedule) requestTick();
     }
 
@@ -420,11 +364,15 @@
       }
       if (pointer.active) {
         try {
-          if (!hostRectCache || !lettersMatrixInverseCache) refreshWordGeometryCache();
-          const inInfluenceBand = isPointerInInfluenceBand();
-          const matrix = inInfluenceBand ? lettersMatrixInverseCache : null;
+          const hostRect = host.getBoundingClientRect();
+          const inInfluenceBand =
+            pointer.x >= hostRect.left - 80 &&
+            pointer.x <= hostRect.right + 80 &&
+            pointer.y >= hostRect.top - 40 &&
+            pointer.y <= hostRect.bottom + 40;
+          const matrix = inInfluenceBand ? letters.getScreenCTM() : null;
           if (matrix) {
-            localPointer = new DOMPoint(pointer.x, pointer.y).matrixTransform(matrix);
+            localPointer = new DOMPoint(pointer.x, pointer.y).matrixTransform(matrix.inverse());
             if (
               localPointer.x < -60 ||
               localPointer.x > wordAxisLength + 60 ||
@@ -438,7 +386,6 @@
           localPointer = null;
         }
       }
-      pointerInfluencing = !!localPointer;
 
       const kernaShift = 40;
       let needsNextFrame = false;
@@ -489,7 +436,6 @@
         wordAxisLength = 0;
         glyphs.length = 0;
         letters.textContent = "";
-        clearWordGeometryCache();
         deactivatePointer(false);
         return;
       }
@@ -502,10 +448,7 @@
       pointer.x = event.clientX;
       pointer.y = event.clientY;
       pointer.active = true;
-      if (!hostRectCache) refreshWordGeometryCache();
-      if (isPointerInInfluenceBand() || pointerInfluencing || hasActiveGlyphMotion()) {
-        requestTick();
-      }
+      requestTick();
     }, { passive: true });
     window.addEventListener("pointerleave", deactivatePointer, { passive: true });
     window.addEventListener("pointercancel", deactivatePointer, { passive: true });
@@ -6771,16 +6714,48 @@ function lockEl(el) {
 
     /**
      * Safely close HID on unload.
-     * Purpose: centralize close-state handling and avoid scattered direct mutations.
-     * @returns {any} Close result.
+     * Uses pagehide (more reliable than beforeunload for async teardown)
+     * and visibilitychange for proactive early cleanup when tab is hidden.
+     * @returns {void}
      */
     const safeClose = () => {
-      try { void window.__HID_API_INSTANCE__?.close(); } catch (_) {}
+      try {
+        const api = window.__HID_API_INSTANCE__;
+        if (api && typeof api.close === "function") {
+          // Call close() and catch errors; the browser may or may not
+          // wait for the async work, but this is far better than
+          // void-discarding the promise (which guarantees a leak).
+          const result = api.close();
+          if (result && typeof result.then === "function") {
+            result.catch(function() {});
+          }
+        }
+      } catch (_) {}
     };
 
-    window.addEventListener("beforeunload", safeClose);
+    // Proactive cleanup: close device when tab becomes hidden
+    // (switching tabs, minimizing). This runs while the page is still
+    // fully alive, so the async close completes reliably.
+    document.addEventListener("visibilitychange", function() {
+      if (document.visibilityState === "hidden") {
+        // Stop battery auto-read early to prevent in-flight reads
+        // from racing with device close.
+        try { stopBatteryAutoRead(); } catch (_) {}
+        safeClose();
+      }
+    });
 
-    window.addEventListener("pagehide", safeClose);
+    window.addEventListener("pagehide", function(event) {
+      // Skip if page is entering bfcache (persisted)
+      if (event.persisted) return;
+      try { stopBatteryAutoRead(); } catch (_) {}
+      safeClose();
+    });
+
+    window.addEventListener("beforeunload", function() {
+      try { stopBatteryAutoRead(); } catch (_) {}
+      safeClose();
+    });
   }
 
 
@@ -10781,8 +10756,6 @@ function openDrawer(btn) {
           `firstInput=${Number(item.firstCollectionInputReportCount ?? 0)}`,
           `usage=${formatSummaryHex(item.usage)}`,
           `feature=${item.hasFeatureReports ? "yes" : "no"}(${Number(item.featureReportCount ?? 0)})`,
-          `feature0=${item.hasFeatureReportZero ? "yes" : "no"}`,
-          `feature0Probe=${item.canTryFeatureReportZero ? "yes" : "no"}`,
           `input=${item.hasInputReports ? "yes" : "no"}(${Number(item.inputReportCount ?? 0)})`,
         ].join(" ");
       };
@@ -11203,8 +11176,30 @@ function openDrawer(btn) {
    * @returns {Promise<any>} Async result.
    */
   let __autoConnecting = false;
+  let __preCleanupDone = false;
   const initAutoConnect = async () => {
       if (__autoConnecting || hidConnecting || isHidOpened()) return;
+
+      // Pre-cleanup: close any device handles leaked from a previous
+      // session (e.g., tab closed before async close() completed).
+      // This runs once per page load, before the first connect attempt.
+      if (!__preCleanupDone) {
+        __preCleanupDone = true;
+        try {
+          const devices = await navigator.hid.getDevices();
+          let closed = 0;
+          for (const d of devices) {
+            if (d.opened) {
+              try { await d.close(); closed++; } catch (_) {}
+            }
+          }
+          if (closed > 0) {
+            console.warn("[ClickSync] Pre-cleanup: closed " + closed + " dangling device(s)");
+          }
+        } catch (e) {
+          // Ignore errors during pre-cleanup (e.g., navigator.hid not available yet)
+        }
+      }
       
       const detectedDev = await autoConnectHidOnce();
       if (detectedDev) {

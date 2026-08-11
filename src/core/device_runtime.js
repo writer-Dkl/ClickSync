@@ -812,6 +812,22 @@
     const handles = sameModelHandles.length ? sameModelHandles : allHandles;
     const handleSummaries = handles.map((item) => item.summary);
 
+    console.log("[DeviceRuntime] resolveRazerConnectionPlans | total handles=" + handles.length +
+      " | sameModel=" + sameModelHandles.length);
+    handles.forEach(function (item, i) {
+      var s = item.summary;
+      console.log("[DeviceRuntime]   handle[" + i + "] pid=0x" +
+        (s.productId ? s.productId.toString(16) : "?") +
+        " collections=" + s.collectionCount +
+        " up=0x" + (s.usagePage ? s.usagePage.toString(16) : "?") +
+        " use=0x" + (s.usage ? s.usage.toString(16) : "?") +
+        " legacyMouse=" + s.legacyPrimaryMouseCollection +
+        " legacyCtrl=" + s.legacyControlCandidate +
+        " featRpts=" + s.featureReportCount +
+        " inputRpts=" + s.inputReportCount +
+        " name=" + String(s.productName || "").substring(0, 40));
+    });
+
     const buildPlan = (control, event, { transportMode = "" } = {}) => {
       const controlSummary = control.summary;
       const eventSummary = event.summary;
@@ -837,8 +853,10 @@
       if (mouseHandle) {
         const nonMouseHandle = _pickRazerViperNonMouseControlHandle(handles, mouseHandle);
         if (nonMouseHandle) {
+          console.log("[DeviceRuntime] ViperV3 plan: SEPARATE mode (ctrl=MI_02, evt=MI_00)");
           return buildPlan(nonMouseHandle, mouseHandle, { transportMode: "legacy-v3" });
         }
+        console.log("[DeviceRuntime] ViperV3 plan: SHARED fallback (MI_02 not found in handles)");
         return buildPlan(mouseHandle, mouseHandle, { transportMode: "legacy-v3" });
       }
       return {

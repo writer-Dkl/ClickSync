@@ -572,11 +572,6 @@
       this._reportId = RAZER_WEBHID_REPORT_ID;
       this._transactionId = 0;
       this._transportMode = RAZER_TRANSPORT_MODE.OFFICIAL;
-      this._channelDegraded = null;
-      this._inputListenerBound = false;
-      this._lastInputBytes = null;
-      this._lastInputTs = 0;
-      this._reopenedOnce = false;
     }
 
     setDevice(device, productId = 0, opts = {}) {
@@ -587,20 +582,12 @@
       }
       this._reportId = this._collectReportId();
       this._transactionId = 0;
-      this._channelDegraded = null;
-      this._lastInputBytes = null;
-      this._lastInputTs = 0;
-      this._reopenedOnce = false;
     }
 
     setTransportMode(mode) {
       this._transportMode = normalizeRazerTransportMode(mode);
       this._reportId = this._collectReportId();
       this._transactionId = 0;
-      this._channelDegraded = null;
-      this._lastInputBytes = null;
-      this._lastInputTs = 0;
-      this._reopenedOnce = false;
     }
 
     _usesLegacyV3Transport() {
@@ -646,106 +633,23 @@
 
     async _sendFeature(reportId, payload) {
       this._requireOpenDevice();
-      try {
-        await this._withTimeout(
-          this.device.sendFeatureReport(Number(reportId), payload),
-          this.sendTimeoutMs,
-          "IO_WRITE_TIMEOUT",
-          `sendFeatureReport timeout (${this.sendTimeoutMs}ms)`
-        );
-      } catch (err) {
-        // Legacy V3 devices: if the feature-report channel is unavailable on this
-        // interface (e.g. MI_02 Razer control interface), fall back to the classic
-        // output-report channel (sendReport) used by OpenRazer/Synapse.
-        if (this._usesLegacyV3Transport() && !this._channelDegraded) {
-          const ok = await this._tryOutputChannel(payload);
-          if (ok) return;
-        }
-        throw err;
-      }
-    }
-
-    async _tryOutputChannel(payload) {
-      const candidates = [0x01, 0x00];
-      for (let i = 0; i < candidates.length; i++) {
-        const rid = candidates[i];
-        try {
-          await this._withTimeout(
-            this.device.sendReport(rid, payload),
-            this.sendTimeoutMs,
-            "IO_WRITE_TIMEOUT",
-            `sendReport(${rid}) timeout (${this.sendTimeoutMs}ms)`
-          );
-          this._channelDegraded = "output-" + rid;
-          this._listenInput();
-          console.warn("[Razer] Feature channel unavailable, degraded to output report " + rid);
-          return true;
-        } catch (e) {
-          const eMsg = String(e?.message || e || "");
-          const eCode = String(e?.code || e?.name || "");
-          console.warn("[Razer] sendReport(" + rid + ") fallback failed | code=" + eCode + " | msg=" + eMsg);
-        }
-      }
-      return false;
-    }
-
-    _listenInput() {
-      if (!this.device || typeof this.device.addEventListener !== "function") return;
-      if (this._inputListenerBound) return;
-      this.device.addEventListener("inputreport", (event) => {
-        this._lastInputBytes = new Uint8Array(event?.data || []);
-        this._lastInputTs = Date.now();
-      });
-      this._inputListenerBound = true;
-    }
-
-    async _waitInputReport(timeoutMs) {
-      const baseTs = this._lastInputTs || 0;
-      const deadline = Date.now() + Math.max(1, Number(timeoutMs) || this.readTimeoutMs);
-      while (Date.now() < deadline) {
-        if (this._lastInputTs > baseTs) {
-          return toDataViewU8(this._lastInputBytes);
-        }
-        await sleep(30);
-      }
-      throw new ProtocolError(`input report timeout (${this.readTimeoutMs}ms)`, "IO_READ_TIMEOUT", {
-        timeoutMs: this.readTimeoutMs,
-      });
-    }
-
-    async _reopenControlDevice() {
-      const dev = this.device;
-      if (!dev) return;
-      if (dev.opened) {
-        try {
-          await dev.close();
-        } catch (e) {
-          // ignore close errors
-        }
-      }
-      await sleep(150);
-      await dev.open();
-      this._channelDegraded = null;
-      this._lastInputBytes = null;
-      this._lastInputTs = 0;
+      await this._withTimeout(
+        this.device.sendFeatureReport(Number(reportId), payload),
+        this.sendTimeoutMs,
+        "IO_WRITE_TIMEOUT",
+        `sendFeatureReport timeout (${this.sendTimeoutMs}ms)`
+      );
     }
 
     async _recvFeature(reportId) {
       this._requireOpenDevice();
-      try {
-        const raw = await this._withTimeout(
-          this.device.receiveFeatureReport(Number(reportId)),
-          this.readTimeoutMs,
-          "IO_READ_TIMEOUT",
-          `receiveFeatureReport timeout (${this.readTimeoutMs}ms)`
-        );
-        return toDataViewU8(raw);
-      } catch (err) {
-        if (this._usesLegacyV3Transport() && this._channelDegraded) {
-          return await this._waitInputReport(this.readTimeoutMs);
-        }
-        throw err;
-      }
+      const raw = await this._withTimeout(
+        this.device.receiveFeatureReport(Number(reportId)),
+        this.readTimeoutMs,
+        "IO_READ_TIMEOUT",
+        `receiveFeatureReport timeout (${this.readTimeoutMs}ms)`
+      );
+      return toDataViewU8(raw);
     }
 
     /**
@@ -868,17 +772,6 @@
                 : RAZER_NOT_ALLOWED_SAME_ID_RETRY;
               const permissionRetryBudget = Math.min(retryBudget, sameIdRetry);
               if (attempt >= permissionRetryBudget) throw err;
-              // The kernel driver (mouhid) may have seized the interface; try to
-              // regain I/O by closing and reopening the control device once.
-              if (usesLegacyV3 && !this._reopenedOnce) {
-                this._reopenedOnce = true;
-                try {
-                  console.warn("[Razer] Feature write blocked, reopening control device to regain I/O...");
-                  await this._reopenControlDevice();
-                } catch (reopenErr) {
-                  console.warn("[Razer] Reopen attempt failed: " + String(reopenErr?.message || reopenErr));
-                }
-              }
             }
 
             if (
@@ -4130,18 +4023,21 @@
         const errMsg = String(lastErr?.message || lastErr || "");
         const devInfo = this.device || {};
         const colInfo = (devInfo.collections && devInfo.collections[0]) || {};
-        console.warn(
-          "[Razer] Legacy V3 battery read FAILED | field=" + String(label || "") +
-          " | code=" + errCode +
-          " | msg=" + errMsg.substring(0, 150) +
-          " | transportMode=" + this._transportMode +
-          " | device.opened=" + (!!(this.device && this.device.opened)) +
-          " | featureReports=" + (colInfo.featureReports ? colInfo.featureReports.length : 0) +
-          " | inputReports=" + (colInfo.inputReports ? colInfo.inputReports.length : 0) +
-          " | reportId=" + (this._driver?._reportId ?? "?") +
-          " | pid=" + pid,
-          { field: String(label || ""), pid, transportMode: this._transportMode, code: errCode, message: errMsg, err: lastErr }
-        );
+        if (!this._batteryDiagLogged) {
+          this._batteryDiagLogged = true;
+          console.warn(
+            "[Razer] Legacy V3 battery read FAILED | field=" + String(label || "") +
+            " | code=" + errCode +
+            " | msg=" + errMsg.substring(0, 150) +
+            " | transportMode=" + this._transportMode +
+            " | device.opened=" + (!!(this.device && this.device.opened)) +
+            " | featureReports=" + (colInfo.featureReports ? colInfo.featureReports.length : 0) +
+            " | inputReports=" + (colInfo.inputReports ? colInfo.inputReports.length : 0) +
+            " | reportId=" + (this._driver?._reportId ?? "?") +
+            " | pid=" + pid,
+            { field: String(label || ""), pid, transportMode: this._transportMode, code: errCode, message: errMsg, err: lastErr }
+          );
+        }
         return null;
       };
 

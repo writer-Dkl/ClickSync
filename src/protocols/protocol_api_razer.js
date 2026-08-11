@@ -572,6 +572,10 @@
       this._reportId = RAZER_WEBHID_REPORT_ID;
       this._transactionId = 0;
       this._transportMode = RAZER_TRANSPORT_MODE.OFFICIAL;
+      this._channelDegraded = null;
+      this._inputListenerBound = false;
+      this._lastInputBytes = null;
+      this._lastInputTs = 0;
     }
 
     setDevice(device, productId = 0, opts = {}) {
@@ -582,12 +586,18 @@
       }
       this._reportId = this._collectReportId();
       this._transactionId = 0;
+      this._channelDegraded = null;
+      this._lastInputBytes = null;
+      this._lastInputTs = 0;
     }
 
     setTransportMode(mode) {
       this._transportMode = normalizeRazerTransportMode(mode);
       this._reportId = this._collectReportId();
       this._transactionId = 0;
+      this._channelDegraded = null;
+      this._lastInputBytes = null;
+      this._lastInputTs = 0;
     }
 
     _usesLegacyV3Transport() {
@@ -633,23 +643,87 @@
 
     async _sendFeature(reportId, payload) {
       this._requireOpenDevice();
-      await this._withTimeout(
-        this.device.sendFeatureReport(Number(reportId), payload),
-        this.sendTimeoutMs,
-        "IO_WRITE_TIMEOUT",
-        `sendFeatureReport timeout (${this.sendTimeoutMs}ms)`
-      );
+      try {
+        await this._withTimeout(
+          this.device.sendFeatureReport(Number(reportId), payload),
+          this.sendTimeoutMs,
+          "IO_WRITE_TIMEOUT",
+          `sendFeatureReport timeout (${this.sendTimeoutMs}ms)`
+        );
+      } catch (err) {
+        // Legacy V3 devices: if the feature-report channel is unavailable on this
+        // interface (e.g. MI_02 Razer control interface), fall back to the classic
+        // output-report channel (sendReport) used by OpenRazer/Synapse.
+        if (this._usesLegacyV3Transport() && !this._channelDegraded) {
+          const ok = await this._tryOutputChannel(payload);
+          if (ok) return;
+        }
+        throw err;
+      }
+    }
+
+    async _tryOutputChannel(payload) {
+      const candidates = [0x01, 0x00];
+      for (let i = 0; i < candidates.length; i++) {
+        const rid = candidates[i];
+        try {
+          await this._withTimeout(
+            this.device.sendReport(rid, payload),
+            this.sendTimeoutMs,
+            "IO_WRITE_TIMEOUT",
+            `sendReport(${rid}) timeout (${this.sendTimeoutMs}ms)`
+          );
+          this._channelDegraded = "output-" + rid;
+          this._listenInput();
+          console.warn("[Razer] Feature channel unavailable, degraded to output report " + rid);
+          return true;
+        } catch (e) {
+          // try next candidate
+        }
+      }
+      return false;
+    }
+
+    _listenInput() {
+      if (!this.device || typeof this.device.addEventListener !== "function") return;
+      if (this._inputListenerBound) return;
+      this.device.addEventListener("inputreport", (event) => {
+        this._lastInputBytes = new Uint8Array(event?.data || []);
+        this._lastInputTs = Date.now();
+      });
+      this._inputListenerBound = true;
+    }
+
+    async _waitInputReport(timeoutMs) {
+      const baseTs = this._lastInputTs || 0;
+      const deadline = Date.now() + Math.max(1, Number(timeoutMs) || this.readTimeoutMs);
+      while (Date.now() < deadline) {
+        if (this._lastInputTs > baseTs) {
+          return toDataViewU8(this._lastInputBytes);
+        }
+        await sleep(30);
+      }
+      throw new ProtocolError(`input report timeout (${this.readTimeoutMs}ms)`, "IO_READ_TIMEOUT", {
+        timeoutMs: this.readTimeoutMs,
+      });
     }
 
     async _recvFeature(reportId) {
       this._requireOpenDevice();
-      const raw = await this._withTimeout(
-        this.device.receiveFeatureReport(Number(reportId)),
-        this.readTimeoutMs,
-        "IO_READ_TIMEOUT",
-        `receiveFeatureReport timeout (${this.readTimeoutMs}ms)`
-      );
-      return toDataViewU8(raw);
+      try {
+        const raw = await this._withTimeout(
+          this.device.receiveFeatureReport(Number(reportId)),
+          this.readTimeoutMs,
+          "IO_READ_TIMEOUT",
+          `receiveFeatureReport timeout (${this.readTimeoutMs}ms)`
+        );
+        return toDataViewU8(raw);
+      } catch (err) {
+        if (this._usesLegacyV3Transport() && this._channelDegraded) {
+          return await this._waitInputReport(this.readTimeoutMs);
+        }
+        throw err;
+      }
     }
 
     /**

@@ -3178,7 +3178,6 @@ async function enterAppWithLiquidTransition(origin = null) {
   let __batteryPrimePendingForCurrentSession = false;
   let __pendingHandshakeBatterySnapshot = null;
   let __batteryFastRetryTimer = null;
-  let __batteryFastRetryCount = 0;
   let __batteryFastRetryBusy = false;
 
   function parseBatteryPercent(rawBatteryText) {
@@ -3302,20 +3301,14 @@ async function enterAppWithLiquidTransition(origin = null) {
    * Start silent fast retry after a failed battery read.
    * Purpose: wireless mice reject feature reports while the radio link sleeps;
    * the dongle answers again right after the mouse wakes up (the user moves it
-   * to use the page anyway). Poll quietly so the battery appears with no extra
-   * action and no console noise.
+   * to use the page anyway). Poll quietly and indefinitely (until success,
+   * disconnect, or page close) so the battery appears with no extra action and
+   * no console noise, no matter when the user moves the mouse.
    */
   function startBatteryFastRetry() {
     if (__batteryFastRetryTimer) return;
-    const maxAttempts = 45; // ~90s window at 2s cadence
-    __batteryFastRetryCount = 0;
     __batteryFastRetryTimer = setInterval(() => {
       if (__batteryFastRetryBusy) return;
-      __batteryFastRetryCount++;
-      if (__batteryFastRetryCount > maxAttempts) {
-        stopBatteryFastRetry();
-        return;
-      }
       __batteryFastRetryBusy = true;
       requestBatterySafe("", true).finally(() => {
         __batteryFastRetryBusy = false;
@@ -3325,15 +3318,25 @@ async function enterAppWithLiquidTransition(origin = null) {
 
   /**
    * Stop silent fast retry.
-   * Purpose: cleanup when a read succeeds, the link drops, or the window expires.
+   * Purpose: cleanup when a read succeeds, the link drops, or the page closes.
    */
   function stopBatteryFastRetry() {
     if (__batteryFastRetryTimer) {
       clearInterval(__batteryFastRetryTimer);
       __batteryFastRetryTimer = null;
     }
-    __batteryFastRetryCount = 0;
   }
+
+  // When the tab comes back to the foreground and the battery is still unknown,
+  // retry once immediately: the user is back and likely moving the mouse, which
+  // wakes the wireless link. Silent, no console noise.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    if (!isHidReady()) return;
+    if (!supportsActiveBatteryRead()) return;
+    if (__batteryKnownForCurrentSession) return;
+    requestBatterySafe("", true);
+  });
 
 
   /**

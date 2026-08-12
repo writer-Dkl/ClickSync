@@ -3177,6 +3177,9 @@ async function enterAppWithLiquidTransition(origin = null) {
   let __batteryKnownForCurrentSession = false;
   let __batteryPrimePendingForCurrentSession = false;
   let __pendingHandshakeBatterySnapshot = null;
+  let __batteryFastRetryTimer = null;
+  let __batteryFastRetryCount = 0;
+  let __batteryFastRetryBusy = false;
 
   function parseBatteryPercent(rawBatteryText) {
     const txt = String(rawBatteryText ?? "").trim();
@@ -3264,10 +3267,14 @@ async function enterAppWithLiquidTransition(origin = null) {
    * Safely request battery status.
    * Purpose: request only when connection state is valid and avoid invalid calls.
    * @param {any} reason - Request reason tag.
+   * @param {boolean} isFastRetry - Internal silent retry (no logs, no user-visible noise).
    * @returns {Promise<any>} Async result.
    */
-  async function requestBatterySafe(reason = "") {
-    if (!isHidReady()) return;
+  async function requestBatterySafe(reason = "", isFastRetry = false) {
+    if (!isHidReady()) {
+      if (isFastRetry) stopBatteryFastRetry();
+      return;
+    }
     if (!supportsActiveBatteryRead()) return;
     // During connect bootstrap, skip the extra prime read when a protocol has
     // already surfaced a valid battery value via cfg/onBattery.
@@ -3275,14 +3282,57 @@ async function enterAppWithLiquidTransition(origin = null) {
     try {
       const bat = await hidApi.requestBattery();
       if (normalizeBatteryPercentValue(bat?.batteryPercent) == null) {
-        if (reason) log(window.tr(`电量刷新未返回有效数据(${reason})`, `Battery refresh returned no valid value (${reason})`));
+        if (!isFastRetry) {
+          if (reason) log(window.tr(`电量刷新未返回有效数据(${reason})`, `Battery refresh returned no valid value (${reason})`));
+          startBatteryFastRetry();
+        }
         return;
       }
+      stopBatteryFastRetry();
       if (reason) log(window.tr(`已刷新电量(${reason})`, `Battery refreshed (${reason})`));
     } catch (e) {
-
-      logErr(e, window.tr("请求电量失败", "Battery request failed"));
+      if (!isFastRetry) {
+        logErr(e, window.tr("请求电量失败", "Battery request failed"));
+        startBatteryFastRetry();
+      }
     }
+  }
+
+  /**
+   * Start silent fast retry after a failed battery read.
+   * Purpose: wireless mice reject feature reports while the radio link sleeps;
+   * the dongle answers again right after the mouse wakes up (the user moves it
+   * to use the page anyway). Poll quietly so the battery appears with no extra
+   * action and no console noise.
+   */
+  function startBatteryFastRetry() {
+    if (__batteryFastRetryTimer) return;
+    const maxAttempts = 45; // ~90s window at 2s cadence
+    __batteryFastRetryCount = 0;
+    __batteryFastRetryTimer = setInterval(() => {
+      if (__batteryFastRetryBusy) return;
+      __batteryFastRetryCount++;
+      if (__batteryFastRetryCount > maxAttempts) {
+        stopBatteryFastRetry();
+        return;
+      }
+      __batteryFastRetryBusy = true;
+      requestBatterySafe("", true).finally(() => {
+        __batteryFastRetryBusy = false;
+      });
+    }, 2000);
+  }
+
+  /**
+   * Stop silent fast retry.
+   * Purpose: cleanup when a read succeeds, the link drops, or the window expires.
+   */
+  function stopBatteryFastRetry() {
+    if (__batteryFastRetryTimer) {
+      clearInterval(__batteryFastRetryTimer);
+      __batteryFastRetryTimer = null;
+    }
+    __batteryFastRetryCount = 0;
   }
 
 
@@ -3318,6 +3368,7 @@ async function enterAppWithLiquidTransition(origin = null) {
     if (batteryTimer) clearInterval(batteryTimer);
     batteryTimer = null;
     __batteryPrimePendingForCurrentSession = false;
+    stopBatteryFastRetry();
   }
 
   /**
